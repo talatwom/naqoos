@@ -348,3 +348,75 @@ class YouTubeService:
                             except: pass
         except Exception:
             pass
+
+    def get_playlist_info(self, playlist_url_or_id, max_tracks=50):
+        """
+        استخراج مشخصات و لیست ترک‌های پلی‌لیست یوتیوب به صورت Flat و پرسرعت
+        """
+        clean_url = playlist_url_or_id
+        if not clean_url.startswith("http"):
+            clean_url = f"https://www.youtube.com/playlist?list={playlist_url_or_id}"
+
+        ydl_opts = {
+            'extract_flat': True,
+            'quiet': True,
+            'no_warnings': True,
+            'ignoreerrors': True,
+            'extractor_args': {
+                'youtube': {'player_client': ['mweb', 'web']},
+                'youtubepot-bgutilhttp': {'base_url': ['http://Lyraz_pot:4416', 'http://pot:4416', 'http://172.17.0.1:4416', 'http://127.0.0.1:4416']}
+            }
+        }
+        if os.path.exists(Config.YT_COOKIES_PATH) and os.path.getsize(Config.YT_COOKIES_PATH) > 50:
+            ydl_opts['cookiefile'] = Config.YT_COOKIES_PATH
+
+        try:
+            with yt_dlp.YoutubeDL(ydl_opts) as ydl:
+                res = ydl.extract_info(clean_url, download=False)
+                if not res:
+                    return {'status': 'error', 'message': 'Could not extract playlist information.'}
+
+                playlist_title = res.get('title') or 'YouTube Playlist'
+                entries = [e for e in res.get('entries', []) if e and e.get('id')]
+                formatted_tracks = []
+
+                for e in entries:
+                    vid = e.get('id')
+                    raw_title = e.get('title') or 'Unknown Track'
+                    raw_artist = e.get('uploader') or e.get('channel') or 'YouTube Artist'
+                    duration = e.get('duration') or 0
+
+                    clean_artist = self.clean_artist_name(raw_artist)
+                    clean_title = raw_title
+                    if ' - ' in raw_title:
+                        parts = raw_title.split(' - ', 1)
+                        if len(parts) == 2 and len(parts[0].strip()) > 0 and len(parts[1].strip()) > 0:
+                            clean_artist = self.clean_artist_name(parts[0].strip())
+                            clean_title = parts[1].strip()
+
+                    formatted_tracks.append({
+                        'title': clean_title,
+                        'artist': clean_artist,
+                        'videoId': vid,
+                        'video_id': vid,
+                        'duration': duration,
+                        'search_query': f"{clean_artist} {clean_title}".strip(),
+                        'cover': f"https://i.ytimg.com/vi/{vid}/hqdefault.jpg"
+                    })
+
+                    if max_tracks and len(formatted_tracks) >= max_tracks:
+                        break
+
+                if not formatted_tracks:
+                    return {'status': 'error', 'message': 'No playable tracks found in this playlist.'}
+
+                return {
+                    'status': 'success',
+                    'name': playlist_title,
+                    'total': len(formatted_tracks),
+                    'tracks': formatted_tracks,
+                    'cover': f"https://i.ytimg.com/vi/{formatted_tracks[0]['videoId']}/hqdefault.jpg" if formatted_tracks else None
+                }
+        except Exception as e:
+            logger.error(f"Failed to extract YouTube playlist: {e}")
+            return {'status': 'error', 'message': str(e)}

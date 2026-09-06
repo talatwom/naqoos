@@ -269,12 +269,78 @@ async def check_quota_and_channel_membership(update: Update, context: ContextTyp
 
     return True
 
+async def start_youtube_playlist_download(update: Update, context: ContextTypes.DEFAULT_TYPE, playlist_url_or_id: str, status_msg):
+    """دانلود خودکار و دسته‌ای پلی‌لیست‌های یوتیوب با استفاده از ماژول چندرشته‌ای"""
+    if not await check_quota_and_channel_membership(update, context):
+        return
+
+    pl_data = await asyncio.to_thread(yt_service.get_playlist_info, playlist_url_or_id, max_tracks=50)
+    
+    if pl_data.get('status') == 'error':
+        await status_msg.edit_text(f"❌ {pl_data.get('message', 'Failed to fetch YouTube playlist.')}")
+        return
+
+    tracks = pl_data.get('tracks', [])
+    playlist_name = pl_data.get('name', 'YouTube Playlist')
+    cover_url = pl_data.get('cover')
+
+    if not tracks:
+        await status_msg.edit_text("❌ No playable tracks found in this YouTube playlist.")
+        return
+
+    user = update.effective_user
+    chat = update.effective_chat
+
+    await status_msg.edit_text(
+        f"📥 Found *{len(tracks)}* tracks in *{playlist_name}*.\nInitializing download engine...",
+        parse_mode=ParseMode.MARKDOWN
+    )
+
+    from core.tasks import download_playlist_batch
+    
+    def fetch_meta_sync():
+        return get_user_current_session(user.id), get_user_role(user.id)
+        
+    current_token, role = await asyncio.to_thread(fetch_meta_sync)
+    from core.services.bot.database import get_user_referral_stats
+    ref_count, _, _ = await asyncio.to_thread(get_user_referral_stats, user.id)
+    playlist_prio = 90 if (role == 'admin' or ref_count >= 3) else 45
+
+    download_playlist_batch(
+        tracks=tracks,
+        playlist_name=playlist_name,
+        cover_url=cover_url,
+        user_id=user.id,
+        user_first_name=user.first_name,
+        session_token=current_token,
+        chat_id=chat.id,
+        message_id=status_msg.message_id,
+        quality=Config.AUDIO_QUALITY,
+        priority=playlist_prio
+    )
+
 async def handle_youtube_link(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
     if not await check_quota_and_channel_membership(update, context):
         return
 
-    match = re.search(r'(?:v=|/)([0-9A-Za-z_-]{11}).*', url)
+    # ۱. بررسی اینکه آیا لینک ارسالی یک پلی‌لیست یوتیوب است
+    is_pure_playlist = ('/playlist' in url) or ('list=' in url and 'v=' not in url and 'youtu.be/' not in url)
+    pl_match = re.search(r'[?&]list=([a-zA-Z0-9_-]+)', url)
+
+    if is_pure_playlist and pl_match:
+        playlist_id = pl_match.group(1)
+        status_msg = await update.message.reply_text("🔎 Analyzing YouTube Playlist...")
+        await start_youtube_playlist_download(update, context, playlist_id, status_msg)
+        return
+
+    # ۲. استخراج شناسه ویدیو برای تک‌ترک
+    match = re.search(r'(?:v=|/)([0-9A-Za-z_-]{11})', url)
     if not match:
+        if pl_match:
+            playlist_id = pl_match.group(1)
+            status_msg = await update.message.reply_text("🔎 Analyzing YouTube Playlist...")
+            await start_youtube_playlist_download(update, context, playlist_id, status_msg)
+            return
         await update.message.reply_text("❌ Invalid YouTube link format.")
         return
         
@@ -290,6 +356,18 @@ async def handle_youtube_link(update: Update, context: ContextTypes.DEFAULT_TYPE
         title, artist = "YouTube Track", "Unknown Artist"
 
     await dispatch_to_huey(update, context, vid, title, artist, status_msg)
+
+    # ۳. اگر ویدیو عضوی از یک پلی‌لیست بود، دکمه دانلود اختیاری کل پلی‌لیست ارسال شود
+    if pl_match:
+        playlist_id = pl_match.group(1)
+        keyboard = InlineKeyboardMarkup([
+            [InlineKeyboardButton("🗂 Download Full Playlist", callback_data=f"dl_yt_pl:{playlist_id}")]
+        ])
+        await update.message.reply_text(
+            f"💡 *This track is part of a playlist!*\nTap below to download all tracks from this playlist:",
+            parse_mode=ParseMode.MARKDOWN,
+            reply_markup=keyboard
+        )
 
 
 async def handle_spotify_link(update: Update, context: ContextTypes.DEFAULT_TYPE, url: str):
@@ -801,6 +879,16 @@ async def handle_callbacks(update: Update, context: ContextTypes.DEFAULT_TYPE):
             parse_mode=ParseMode.MARKDOWN, 
             reply_markup=ForceReply(selective=True)
         )
+
+    elif data.startswith("dl_yt_pl:"):
+        pl_id = data.split(":", 1)[1]
+        try:
+            await query.answer("📥 Initializing playlist download...", show_alert=False)
+            status_msg = await query.message.reply_text("🔎 Fetching playlist tracks from YouTube...")
+            await start_youtube_playlist_download(update, context, pl_id, status_msg)
+        except Exception as e:
+            logger.error(f"Error starting playlist callback download: {e}")
+            await query.message.reply_text("❌ Failed to initiate playlist download.")
 
     elif data.startswith("dl_"):
         vid = data.split("_")[1]

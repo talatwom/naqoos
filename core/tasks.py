@@ -820,16 +820,17 @@ async def _async_batch_logic(tracks, playlist_name, cover_url, user_id, user_fir
         async with semaphore:
             await update_progress_safe(title)
             try:
-                results = await asyncio.to_thread(yt_service.search, search_query)
-                if not results:
-                    async with state_lock:
-                        failed_count += 1
-                        processed_count += 1
-                    ready_to_deliver[idx] = None
-                    delivery_signal.set()
-                    return False
-
-                vid = results[0].get('videoId')
+                vid = track_info.get('videoId') or track_info.get('video_id')
+                if not vid:
+                    results = await asyncio.to_thread(yt_service.search, search_query)
+                    if not results:
+                        async with state_lock:
+                            failed_count += 1
+                            processed_count += 1
+                        ready_to_deliver[idx] = None
+                        delivery_signal.set()
+                        return False
+                    vid = results[0].get('videoId')
 
                 def check_cache():
                     with sqlite3.connect(Config.DATABASE_URI) as conn:
