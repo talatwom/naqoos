@@ -603,13 +603,25 @@ class CatalogAutopilotService:
                 SET status = 'failed', error_msg = 'Worker timeout / interrupted'
                 WHERE status = 'downloading' AND created_at < datetime('now', '-2 hours')
             """)
-            # همگام‌سازی قطعات منقضی یا ناموفق در جدول campaign_tracks
+
+            # اگر ترکی قبلاً در جدول tracks با موفقیت ذخیره شده، بلافاصله در campaign_tracks به completed تبدیل شود تا هرگز دوباره دانلود نشود
+            conn.execute("""
+                UPDATE campaign_tracks
+                SET status = 'completed', error_msg = NULL
+                WHERE status != 'completed'
+                  AND youtube_id IS NOT NULL
+                  AND youtube_id IN (SELECT youtube_id FROM tracks WHERE youtube_id IS NOT NULL)
+            """)
+
+            # همگام‌سازی قطعات منقضی یا ناموفق در جدول campaign_tracks (فقط در صورتی که در tracks یا لاگ‌های موفق وجود نداشته باشند)
             conn.execute("""
                 UPDATE campaign_tracks
                 SET status = 'failed', error_msg = 'Permanently unavailable [synced/timeout]'
                 WHERE status IN ('queued', 'downloading')
+                  AND youtube_id NOT IN (SELECT youtube_id FROM tracks WHERE youtube_id IS NOT NULL)
                   AND (
-                      youtube_id IN (SELECT youtube_id FROM ingestion_logs WHERE status = 'failed' AND youtube_id IS NOT NULL)
+                      (youtube_id IN (SELECT youtube_id FROM ingestion_logs WHERE status = 'failed' AND youtube_id IS NOT NULL)
+                       AND youtube_id NOT IN (SELECT youtube_id FROM ingestion_logs WHERE status IN ('completed', 'queued', 'downloading')))
                       OR (youtube_id IS NULL AND created_at < datetime('now', '-2 hours'))
                       OR (status = 'queued' AND created_at < datetime('now', '-4 hours'))
                   )
@@ -632,6 +644,7 @@ class CatalogAutopilotService:
                 FROM campaign_tracks ct
                 JOIN artist_campaigns ac ON ct.campaign_id = ac.id
                 WHERE ct.youtube_id IS NOT NULL 
+                  AND ct.youtube_id NOT IN (SELECT youtube_id FROM tracks WHERE youtube_id IS NOT NULL)
                   AND (
                     (ct.status = 'failed' AND (ct.error_msg IS NULL OR ct.error_msg NOT LIKE '%[max_retries]%'))
                     OR (ct.status = 'downloading' AND ct.created_at < datetime('now', '-20 minutes'))
@@ -643,6 +656,15 @@ class CatalogAutopilotService:
                 logger.info(f"🔄 [Autopilot Auto-Healer] Safely checking {len(stuck_tracks)} stuck/failed tracks...")
                 from core.tasks import download_and_process_track
                 for trk in stuck_tracks:
+                    # اگر از قبل در صف پردازش فعال است، دوباره کیو نکن
+                    active_job = conn.execute("""
+                        SELECT 1 FROM ingestion_logs 
+                        WHERE youtube_id = ? AND status IN ('queued', 'downloading')
+                          AND created_at > datetime('now', '-30 minutes')
+                    """, (trk['youtube_id'],)).fetchone()
+                    if active_job:
+                        continue
+
                     fail_count = conn.execute("SELECT COUNT(*) FROM ingestion_logs WHERE youtube_id = ? AND status = 'failed'", (trk['youtube_id'],)).fetchone()[0]
                     if fail_count >= 2:
                         conn.execute("UPDATE campaign_tracks SET status = 'failed', error_msg = 'Permanently unavailable [max_retries]' WHERE id = ?", (trk['id'],))
