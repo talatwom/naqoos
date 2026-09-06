@@ -167,10 +167,11 @@ class SpotifyExtractorService:
 
         raise ValueError(f"Could not recognize a valid Spotify URL or ID: {link}")
 
-    def fetch_artist_discography(self, artist_id, deduplicate_by_name=True, max_limit=None):
+    def fetch_artist_discography(self, artist_id, deduplicate_by_name=True, max_limit=250):
         """
         واکشی کامل دیسکوگرافی آرتیست شامل تمام آلبوم‌ها و سینگل‌ها
         با قابلیت تجمیع بالک، حذف آهنگ‌های همنام و استخراج کاورها.
+        سقف پیش‌فرض ۲۵۰ قطعه برای جلوگیری از ارکسترهای ۱۸ هزار قطعه‌ای و هنگ کردن صف.
         """
         # ۱. اطلاعات پروفایل خواننده
         artist_data = self.api_get(f"{API_BASE}/artists/{artist_id}")
@@ -181,6 +182,7 @@ class SpotifyExtractorService:
         # ۲. واکشی لیست تمام آلبوم‌ها و سینگل‌ها با Pagination
         albums = []
         offset = 0
+        max_albums_to_scan = 50  # حداکثر ۵۰ آلبوم/سینگل برای جلوگیری از حلقه‌های بی‌پایان
         while True:
             res = self.api_get(
                 f"{API_BASE}/artists/{artist_id}/albums",
@@ -188,7 +190,7 @@ class SpotifyExtractorService:
             )
             items = res.get("items", [])
             albums.extend(items)
-            if len(items) < 50 or offset + 50 >= res.get("total", 0):
+            if len(items) < 50 or offset + 50 >= res.get("total", 0) or len(albums) >= max_albums_to_scan:
                 break
             offset += 50
 

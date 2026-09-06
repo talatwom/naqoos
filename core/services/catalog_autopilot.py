@@ -299,8 +299,8 @@ class CatalogAutopilotService:
 
     def launch_artist_campaign(self, spotify_id, target_channel_id=None):
         """راه‌اندازی فوری کمپین استخراج و دانلود دیسکوگرافی یک خواننده از اسپاتیفای"""
-        # ۱. واکشی دیسکوگرافی از اسپاتیفای
-        disco = spotify_extractor.fetch_artist_discography(spotify_id)
+        # ۱. واکشی دیسکوگرافی از اسپاتیفای با سقف ایمن ۲۵۰ قطعه
+        disco = spotify_extractor.fetch_artist_discography(spotify_id, max_limit=250)
         if not disco or not disco.get("tracks"):
             raise ValueError("Could not extract discography or artist has no tracks.")
 
@@ -308,6 +308,8 @@ class CatalogAutopilotService:
         avatar_url = disco.get("artist_image")
         spotify_url = disco.get("artist_url")
         tracks = disco["tracks"]
+        if len(tracks) > 250:
+            tracks = tracks[:250]
 
         target_ch = target_channel_id if target_channel_id and str(target_channel_id) != str(Config.STORAGE_CHANNEL_ID) else None
         
@@ -427,13 +429,32 @@ class CatalogAutopilotService:
             "skipped": res.get("skipped", 0)
         }
 
+    # فهرست جامع و گلچین سوپراستارهای موسیقی ایران (پاپ، رپ، سنتی، تلفیقی، راک و کلاسیک)
+    PERSIAN_SUPERSTAR_ROSTER = [
+        "Alireza Ghorbani", "Reza Bahram", "Alireza Talischi", "Masoud Sadeghloo", 
+        "Mehdi Ahmadvand", "Salar Aghili", "Ali Zand Vakili", "Macan Band", 
+        "Hoorosh Band", "Garsha Rezaei", "Saman Jalili", "Hamid Hiraad", 
+        "Sohrab MJ", "Alireza JJ", "Mazyar Fallahi", "Shohreh", "Leila Forouhar", 
+        "Shahram Shabpareh", "Shahram Solati", "Andy", "Kamran Hooman", "Mansour", 
+        "Bijan Mortazavi", "Hassan Shamaizadeh", "Kaveh Yaghmaei", "Kasra Zahedi", 
+        "Naser Zeinali", "Sohrab Pakzad", "Ashvan", "Sogand", "Donya", "Talkdown", 
+        "Vinak", "021kid", "Mohammad Motamedi", "Shahram Nazeri", "Kayhan Kalhor", 
+        "Hossein Alizadeh", "Pouya", "Omid", "Benyamin Bahadori", "Ali Lohrasbi", 
+        "Sina Shabankhani", "Sina Derakhshande", "Mohammad Alizadeh", "Hamed Homayoun",
+        "Evan Band", "Puzzle Band", "Rastak", "Sina Sarlak", "Amirabbas Golab",
+        "Meysam Ebrahimi", "Yousef Zamani", "Majid Kharatha", "Ali Abdolmaleki",
+        "Ramin Bibak", "Amin Rostami", "Emad Talebzadeh", "Hamid Askari", "Behnam Safavi",
+        "Morteza Ashrafi", "Pouya Bayati", "Ali Ashabi", "Shahab Mozaffari", "Mehdi Jahani",
+        "Ashkan Khatibi", "Sina Parsian", "Danial", "Shayan Yo", "Dorcci", "021G", "Madgal",
+        "Nooshafarin", "Susan Roshan", "Afshin", "Pyruz", "Shahyad", "Siavash Sahneh",
+        "Farshid Amin", "Shahram Kashani", "Davood Behboodi", "Mehdi Moghaddam", "Mehdi Asadi",
+        "Shahab Ramezan", "Mohammad Esfahani", "Alireza Eftekhari", "Abdolhossein Mokhtabad",
+        "Parviz Meshkatian", "Jalal Zolfonun", "Kamyar", "Reza Yazdani", "Hessamoddin Seraj",
+        "Nima Masiha", "Ghasem Afshar"
+    ]
+
     def _discover_top_spotify_artists_dynamically(self, existing_sp_ids, existing_names, limit_needed=5):
-        """کشف کاملاً پویا و خودکار برترین هنرمندان بر اساس بیشترین فالوور و محبوبیت از اسپاتیفای با فیلتر کیفی"""
-        queries = [
-            "persian pop", "persian rap", "sonnati", "hip hop farsi", "iranian top tracks", 
-            "persian hits", "shadmehr", "ebi", "dariush", "homayoun shajarian", "hayedeh"
-        ]
-        
+        """کشف کاملاً پویا و هدفمند برترین خوانندگان ایرانی با اولویت فهرست سوپراستارها و فیلتر دقیق هویت ایرانی"""
         # واکشی بلک‌لیست دیسکاوری‌های ناموفق قبلی
         failed_sp_ids = set()
         try:
@@ -451,46 +472,70 @@ class CatalogAutopilotService:
         except Exception:
             pass
 
-        blacklisted_words = [
-            "choir", "orchestra", "media", "various artists", "american", 
-            "audiobook", "podcast", "karaoke", "instrumental", "soundtrack",
-            "tribute", "compilation", "sound effects", "white noise"
-        ]
-
         candidates = {}
-        for q in queries:
+
+        # اولویت ۱: کشف سوپراستارهای اصیل موسیقی ایران از فهرست مرجع
+        for art_name in self.PERSIAN_SUPERSTAR_ROSTER:
+            if len(candidates) >= limit_needed:
+                break
+            norm_name = art_name.lower().strip()
+            if norm_name in existing_names or any(norm_name in ex for ex in existing_names):
+                continue
+
             try:
-                data = spotify_extractor.api_get(f"{API_BASE}/search", params={"q": q, "type": "artist", "limit": 25})
-                for a in data.get("artists", {}).get("items", []):
-                    if not a or not a.get("id"):
-                        continue
-                    a_id = a["id"]
-                    a_name = (a.get("name") or "").lower().strip()
-                    
-                    if a_id in existing_sp_ids or a_name in existing_names or a_id in failed_sp_ids or a_id in candidates:
-                        continue
-                    
-                    # فیلتر کلمات هرز و غیرهنرمند
-                    if any(w in a_name for w in blacklisted_words):
-                        continue
-                    
-                    # فیلتر کیفی: حداقل ۵,۰۰۰ فالوور یا محبوبیت ۲۰ در اسپاتیفای
-                    followers = (a.get("followers") or {}).get("total", 0)
-                    popularity = a.get("popularity", 0)
-                    if followers < 5000 and popularity < 20:
+                # ابتدا جستجوی دقیق نام خواننده
+                data = spotify_extractor.api_get(f"{API_BASE}/search", params={"q": f'artist:"{art_name}"', "type": "artist", "limit": 1})
+                items = data.get("artists", {}).get("items", [])
+                if not items:
+                    data = spotify_extractor.api_get(f"{API_BASE}/search", params={"q": art_name, "type": "artist", "limit": 1})
+                    items = data.get("artists", {}).get("items", [])
+
+                if items:
+                    a = items[0]
+                    a_id = a.get("id")
+                    if not a_id or a_id in existing_sp_ids or a_id in failed_sp_ids or a_id in candidates:
                         continue
 
-                    candidates[a_id] = a
+                    found_name = (a.get("name") or "").lower().strip()
+                    # بررسی اعتبارسنجی نام جهت پرهیز از نتایج تصادفی
+                    first_word = norm_name.split()[0]
+                    if first_word in found_name or found_name.replace(" ", "") in norm_name.replace(" ", ""):
+                        candidates[a_id] = a
+                        logger.info(f"✨ [Autopilot Discovery] Matched Persian superstar: {a.get('name')} (Spotify ID: {a_id})")
             except Exception as e:
-                logger.warning(f"Error querying dynamic artists for '{q}': {e}")
+                logger.warning(f"Error querying superstar '{art_name}': {e}")
 
-        # مرتب‌سازی زنده بر اساس بیشترین تعداد فالوور در اسپاتیفای (میلیونی به پایین)
-        sorted_candidates = sorted(
-            candidates.values(),
-            key=lambda x: (x.get("followers") or {}).get("total", 0),
-            reverse=True
-        )
-        return sorted_candidates[:limit_needed]
+        # اولویت ۲: در صورت نیاز به هنرمندان بیشتر، جستجوی ژانرهای اختصاصی پاپ و رپ فارسی با فیلتر ناموزون
+        if len(candidates) < limit_needed:
+            blacklisted_words = [
+                "choir", "orchestra", "media", "various artists", "american", 
+                "audiobook", "podcast", "karaoke", "instrumental", "soundtrack",
+                "tribute", "compilation", "sound effects", "white noise", "beethoven", "mozart", "bach"
+            ]
+            genre_queries = ['genre:"persian pop"', 'genre:"persian hip hop"', 'genre:"classic persian pop"']
+            for gq in genre_queries:
+                if len(candidates) >= limit_needed:
+                    break
+                try:
+                    data = spotify_extractor.api_get(f"{API_BASE}/search", params={"q": gq, "type": "artist", "limit": 20})
+                    for a in data.get("artists", {}).get("items", []):
+                        if not a or not a.get("id"):
+                            continue
+                        a_id = a["id"]
+                        a_name = (a.get("name") or "").lower().strip()
+                        if a_id in existing_sp_ids or a_name in existing_names or a_id in failed_sp_ids or a_id in candidates:
+                            continue
+                        if any(w in a_name for w in blacklisted_words):
+                            continue
+                        followers = (a.get("followers") or {}).get("total", 0)
+                        if followers >= 3000:
+                            candidates[a_id] = a
+                            if len(candidates) >= limit_needed:
+                                break
+                except Exception as e:
+                    logger.warning(f"Error querying genre '{gq}': {e}")
+
+        return list(candidates.values())[:limit_needed]
 
     def _discover_top_spotify_playlists_dynamically(self, existing_sources, limit_needed=3):
         """کشف کاملاً پویا و خودکار برترین پلی‌لیست‌های ترند از اسپاتیفای (بدون هاردکد)"""
