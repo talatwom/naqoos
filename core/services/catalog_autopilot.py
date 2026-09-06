@@ -33,10 +33,10 @@ class CatalogAutopilotService:
             total_size_bytes = conn.execute("SELECT COALESCE(SUM(file_size), 0) FROM tracks").fetchone()[0]
             total_duration_sec = conn.execute("SELECT COALESCE(SUM(duration), 0) FROM tracks").fetchone()[0]
             
-            # آمار امروز
+            # آمار قطعات جدید افزوده شده به گنجینه در تاریخ امروز
             ingested_today = conn.execute("""
-                SELECT COUNT(*) FROM ingestion_logs 
-                WHERE status = 'completed' AND date(created_at, 'localtime') = date('now', 'localtime')
+                SELECT COUNT(*) FROM tracks 
+                WHERE date(created_at, 'localtime') = date('now', 'localtime')
             """).fetchone()[0]
 
             campaign_artists_count = conn.execute("SELECT COUNT(*) FROM artist_campaigns").fetchone()[0]
@@ -537,11 +537,18 @@ class CatalogAutopilotService:
 
         return list(candidates.values())[:limit_needed]
 
-    def _discover_top_spotify_playlists_dynamically(self, existing_sources, limit_needed=3):
-        """کشف کاملاً پویا و خودکار برترین پلی‌لیست‌های ترند از اسپاتیفای (بدون هاردکد)"""
-        queries = ["top hits persian", "iranian top hits", "top 50 global", "today top hits", "persian hip hop"]
+    def _discover_top_spotify_playlists_dynamically(self, existing_sources, limit_needed=6):
+        """کشف کاملاً پویا و خودکار برترین پلی‌لیست‌های ترند از اسپاتیفای با اولویت لیست‌های ایرانی"""
+        queries = [
+            "Top Hits Persian", "Persian Pop", "Radio Javan Hits", "Persian Rap", 
+            "Golchin Shad", "Persian Dance Party", "Sonati Irani", "Persian Acoustic", 
+            "Ahang Ghadimi", "Persian Hip Hop", "New Music Farsi", "Iran Top 50", 
+            "Nostalgia Farsi", "Persian Remix", "Persian Chill", "Top 100 Iran"
+        ]
         candidates = {}
         for q in queries:
+            if len(candidates) >= limit_needed:
+                break
             try:
                 data = spotify_extractor.api_get(f"{API_BASE}/search", params={"q": q, "type": "playlist", "limit": 10})
                 for p in data.get("playlists", {}).get("items", []):
@@ -550,8 +557,29 @@ class CatalogAutopilotService:
                         source_label = f"pl:{pl_title[:15]}"
                         if source_label not in existing_sources:
                             candidates[p["id"]] = p
+                            if len(candidates) >= limit_needed:
+                                break
             except Exception as e:
                 logger.warning(f"Error querying dynamic playlists for '{q}': {e}")
+
+        # در صورت نیاز، افزودن از پلی‌لیست‌های برگزیده رادار اسپاتیفای
+        if len(candidates) < limit_needed:
+            try:
+                raw_radar = spotify_extractor.fetch_live_curated_radar()
+                for p in raw_radar.get("playlists", []):
+                    if p and p.get("id") and p["id"] not in candidates:
+                        pl_title = p.get("title") or "playlist"
+                        source_label = f"pl:{pl_title[:15]}"
+                        if source_label not in existing_sources:
+                            candidates[p["id"]] = {
+                                "id": p["id"],
+                                "name": pl_title,
+                                "images": [{"url": p.get("image")}] if p.get("image") else []
+                            }
+                            if len(candidates) >= limit_needed:
+                                break
+            except Exception as e:
+                logger.warning(f"Error checking curated radar playlists: {e}")
 
         return list(candidates.values())[:limit_needed]
 
@@ -752,7 +780,10 @@ class CatalogAutopilotService:
             needed_playlists = max(0, TARGET_ACTIVE_PLAYLISTS - active_pl_count)
 
             if needed_playlists > 0:
-                existing_sources = set(r[0] for r in conn.execute("SELECT DISTINCT source FROM ingestion_logs WHERE source LIKE 'pl:%'").fetchall())
+                existing_sources = set(r[0] for r in conn.execute("""
+                    SELECT DISTINCT source FROM ingestion_logs 
+                    WHERE source LIKE 'pl:%' AND (status IN ('queued', 'downloading') OR created_at > datetime('now', '-3 days'))
+                """).fetchall())
                 top_playlists = self._discover_top_spotify_playlists_dynamically(existing_sources, limit_needed=needed_playlists)
                 for c_pl in top_playlists:
                     pl_name = c_pl.get("name") or "Playlist"
