@@ -390,7 +390,6 @@ class CatalogAutopilotService:
                 "duration": t.get("duration_seconds"),
                 "search_query": f"{t.get('artist_string')} {t.get('title')}"
             })
-
         # تزریق ۳۵ قطعه برتر پلی‌لیست برای پردازش سریع و روان بدون مسدودی صف
         batch_tracks = formatted_tracks[:35]
         res = crawler_service.ingest_tracks_one_by_one(
@@ -429,18 +428,59 @@ class CatalogAutopilotService:
         }
 
     def _discover_top_spotify_artists_dynamically(self, existing_sp_ids, existing_names, limit_needed=5):
-        """کشف کاملاً پویا و خودکار برترین هنرمندان بر اساس بیشترین فالوور و محبوبیت از اسپاتیفای (بدون هاردکد)"""
-        queries = ["persian", "iranian", "top artists", "persian rap", "persian pop"]
+        """کشف کاملاً پویا و خودکار برترین هنرمندان بر اساس بیشترین فالوور و محبوبیت از اسپاتیفای با فیلتر کیفی"""
+        queries = [
+            "persian pop", "persian rap", "sonnati", "hip hop farsi", "iranian top tracks", 
+            "persian hits", "shadmehr", "ebi", "dariush", "homayoun shajarian", "hayedeh"
+        ]
+        
+        # واکشی بلک‌لیست دیسکاوری‌های ناموفق قبلی
+        failed_sp_ids = set()
+        try:
+            with sqlite3.connect(Config.DATABASE_URI) as conn:
+                conn.execute("""
+                    CREATE TABLE IF NOT EXISTS failed_artist_discoveries (
+                        spotify_id TEXT PRIMARY KEY,
+                        artist_name TEXT,
+                        reason TEXT,
+                        created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+                    )
+                """)
+                failed_rows = conn.execute("SELECT spotify_id FROM failed_artist_discoveries").fetchall()
+                failed_sp_ids = set(r[0] for r in failed_rows if r[0])
+        except Exception:
+            pass
+
+        blacklisted_words = [
+            "choir", "orchestra", "media", "various artists", "american", 
+            "audiobook", "podcast", "karaoke", "instrumental", "soundtrack",
+            "tribute", "compilation", "sound effects", "white noise"
+        ]
+
         candidates = {}
         for q in queries:
             try:
                 data = spotify_extractor.api_get(f"{API_BASE}/search", params={"q": q, "type": "artist", "limit": 25})
                 for a in data.get("artists", {}).get("items", []):
-                    if a and a.get("id"):
-                        a_id = a["id"]
-                        a_name = (a.get("name") or "").lower().strip()
-                        if a_id not in existing_sp_ids and a_name not in existing_names and a_id not in candidates:
-                            candidates[a_id] = a
+                    if not a or not a.get("id"):
+                        continue
+                    a_id = a["id"]
+                    a_name = (a.get("name") or "").lower().strip()
+                    
+                    if a_id in existing_sp_ids or a_name in existing_names or a_id in failed_sp_ids or a_id in candidates:
+                        continue
+                    
+                    # فیلتر کلمات هرز و غیرهنرمند
+                    if any(w in a_name for w in blacklisted_words):
+                        continue
+                    
+                    # فیلتر کیفی: حداقل ۵,۰۰۰ فالوور یا محبوبیت ۲۰ در اسپاتیفای
+                    followers = (a.get("followers") or {}).get("total", 0)
+                    popularity = a.get("popularity", 0)
+                    if followers < 5000 and popularity < 20:
+                        continue
+
+                    candidates[a_id] = a
             except Exception as e:
                 logger.warning(f"Error querying dynamic artists for '{q}': {e}")
 
@@ -473,8 +513,10 @@ class CatalogAutopilotService:
     def autopilot_tick(self):
         """
         تپش دوره‌ای اتوپایلوت (هر ۳ دقیقه یک‌بار):
-        حفظ دائمی بافر فعال ۱۰ آرتیست شاخص + ۶ تاپ پلی‌لیست رسمی اسپاتیفای.
-        به محض تکمیل هرکدام، بلافاصله جایگزین بعدی از دیتابیس زنده اسپاتیفای تزریق می‌شود.
+        ۱. خودترمیمی قطعات ناموفق تا حداکثر ۲ بار تلاش
+        ۲. همگام‌سازی وضعیت کمپین‌های تکمیل‌شده و خروج قطعی آن‌ها از صف
+        ۳. تزریق و استخراج پیوسته دیسکوگرافی کمپین‌های فعال
+        ۴. حفظ ظرفیت پایدار ۱۰ خواننده سوپراستار و ۶ پلی‌لیست ترند در صف
         """
         with sqlite3.connect(Config.DATABASE_URI) as conn:
             conn.row_factory = sqlite3.Row
@@ -487,6 +529,17 @@ class CatalogAutopilotService:
                 UPDATE ingestion_logs 
                 SET status = 'failed', error_msg = 'Worker timeout / interrupted'
                 WHERE status = 'downloading' AND created_at < datetime('now', '-2 hours')
+            """)
+            # همگام‌سازی قطعات منقضی یا ناموفق در جدول campaign_tracks
+            conn.execute("""
+                UPDATE campaign_tracks
+                SET status = 'failed', error_msg = 'Permanently unavailable [synced/timeout]'
+                WHERE status IN ('queued', 'downloading')
+                  AND (
+                      youtube_id IN (SELECT youtube_id FROM ingestion_logs WHERE status = 'failed' AND youtube_id IS NOT NULL)
+                      OR (youtube_id IS NULL AND created_at < datetime('now', '-2 hours'))
+                      OR (status = 'queued' AND created_at < datetime('now', '-4 hours'))
+                  )
             """)
             conn.execute("""
                 UPDATE artist_campaigns 
@@ -501,7 +554,6 @@ class CatalogAutopilotService:
             conn.commit()
 
             # ۱. خودترمیمی هوشمند با سقف تلاش مجدد (حداکثر ۲ بار تلاش)
-            # فقط آهنگ‌هایی که شناسه یوتیوب معتبر دارند و خطای دائمی نگرفته‌اند
             stuck_tracks = conn.execute("""
                 SELECT ct.id, ct.title, ct.artist, ct.youtube_id, ct.cover_url, ct.duration_seconds, ac.target_channel_id, ac.artist_name 
                 FROM campaign_tracks ct
@@ -518,7 +570,6 @@ class CatalogAutopilotService:
                 logger.info(f"🔄 [Autopilot Auto-Healer] Safely checking {len(stuck_tracks)} stuck/failed tracks...")
                 from core.tasks import download_and_process_track
                 for trk in stuck_tracks:
-                    # بررسی سابقه تلاش‌های ناموفق در ingestion_logs
                     fail_count = conn.execute("SELECT COUNT(*) FROM ingestion_logs WHERE youtube_id = ? AND status = 'failed'", (trk['youtube_id'],)).fetchone()[0]
                     if fail_count >= 2:
                         conn.execute("UPDATE campaign_tracks SET status = 'failed', error_msg = 'Permanently unavailable [max_retries]' WHERE id = ?", (trk['id'],))
@@ -554,11 +605,19 @@ class CatalogAutopilotService:
                 conn.commit()
 
             # ۲. تزریق و استخراج پیوسته برای کمپین‌هایی که هنوز در انتظار استخراج یوتیوب هستند
+            # علامت‌گذاری ترک‌های بدون یوتیوب آیدی که بیش از ۲ ساعت مانده‌اند به عنوان failed
+            conn.execute("""
+                UPDATE campaign_tracks
+                SET status = 'failed', error_msg = 'No YouTube match available'
+                WHERE youtube_id IS NULL AND status = 'queued' AND created_at < datetime('now', '-2 hours')
+            """)
+            conn.commit()
+
             unresolved_camps = conn.execute("""
                 SELECT ac.id, ac.artist_name, ac.target_channel_id
                 FROM artist_campaigns ac
                 WHERE ac.status = 'processing'
-                  AND EXISTS (SELECT 1 FROM campaign_tracks WHERE campaign_id = ac.id AND youtube_id IS NULL)
+                  AND EXISTS (SELECT 1 FROM campaign_tracks WHERE campaign_id = ac.id AND youtube_id IS NULL AND status = 'queued')
                 LIMIT 2
             """).fetchall()
 
@@ -567,7 +626,7 @@ class CatalogAutopilotService:
                 unresolved_tracks = conn.execute("""
                     SELECT title, artist, cover_url, duration_seconds, spotify_url
                     FROM campaign_tracks
-                    WHERE campaign_id = ? AND youtube_id IS NULL
+                    WHERE campaign_id = ? AND youtube_id IS NULL AND status = 'queued'
                     LIMIT 40
                 """, (cid,)).fetchall()
                 if unresolved_tracks:
@@ -625,6 +684,16 @@ class CatalogAutopilotService:
                         existing_names.add((c_art.get("name") or "").lower().strip())
                     except Exception as e:
                         logger.error(f"Error launching dynamic artist {c_art.get('name')}: {e}")
+                        existing_sp_ids.add(c_art["id"])
+                        existing_names.add((c_art.get("name") or "").lower().strip())
+                        try:
+                            conn.execute("""
+                                INSERT OR REPLACE INTO failed_artist_discoveries (spotify_id, artist_name, reason)
+                                VALUES (?, ?, ?)
+                            """, (c_art["id"], c_art.get("name"), str(e)[:100]))
+                            conn.commit()
+                        except Exception:
+                            pass
 
             # ==========================================
             # 🎯 POOL 2: حفظ پایدار ۶ پلی‌لیست فعال در صف

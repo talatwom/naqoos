@@ -46,15 +46,26 @@ class YouTubeService:
         except Exception as e:
             logger.warning(f"YTMusic API Search Error for '{query}': {e}, falling back to yt-dlp...")
 
-        # پلن پشتیبان سریع و پایدار با yt-dlp (بدون قطعی یا خطای 429)
+        # پلن پشتیبان سریع و پایدار با yt-dlp مجهز به POT Provider (بدون خطای 403 یا مسدودی یوتیوب)
         try:
             import yt_dlp
             ydl_opts = {
                 'extract_flat': True,
                 'quiet': True,
                 'skip_download': True,
-                'no_warnings': True
+                'no_warnings': True,
+                'socket_timeout': 5,
+                'extractor_args': {
+                    'youtube': {
+                        'player_client': ['mweb', 'web'],
+                    },
+                    'youtubepot-bgutilhttp': {
+                        'base_url': ['http://Lyraz_pot:4416', 'http://pot:4416', 'http://172.17.0.1:4416', 'http://127.0.0.1:4416']
+                    }
+                }
             }
+            if os.path.exists(Config.YT_COOKIES_PATH):
+                ydl_opts['cookiefile'] = Config.YT_COOKIES_PATH
             with yt_dlp.YoutubeDL(ydl_opts) as ydl:
                 info = ydl.extract_info(f"ytsearch1:{query}", download=False)
                 entries = info.get('entries', [])
@@ -215,18 +226,18 @@ class YouTubeService:
         if source_url and ('soundcloud.com' in source_url or video_id.startswith('sc_')):
             sources = [source_url]
             if search_query:
-                sources.append(f"scsearch3:{search_query}")
                 sources.append(f"ytsearch1:{search_query}")
+                sources.append(f"scsearch1:{search_query}")
         elif video_id.startswith('sc_'):
             sources = []
             if search_query:
-                sources.append(f"scsearch3:{search_query}")
                 sources.append(f"ytsearch1:{search_query}")
+                sources.append(f"scsearch1:{search_query}")
         else:
             sources = [f"https://www.youtube.com/watch?v={video_id}"]
             if search_query:
-                sources.append(f"scsearch3:{search_query}")
                 sources.append(f"ytsearch1:{search_query}")
+                sources.append(f"scsearch1:{search_query}")
 
         logger.info(f"[*] Starting Multi-Source Download for [{video_id}] | Quality: {target_quality}kbps")
 
