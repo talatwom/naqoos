@@ -219,28 +219,43 @@ class YouTubeService:
         raw_artist = metadata.get('artist', '') if metadata else ''
         raw_title = metadata.get('title', '') if metadata else ''
         source_url = metadata.get('source_url', '') if metadata else ''
+        expected_dur = None
+        if metadata and metadata.get('duration'):
+            try:
+                expected_dur = int(float(metadata['duration']))
+            except (ValueError, TypeError):
+                expected_dur = None
+
         clean_art = re.sub(r'\s*-\s*Topic$', '', raw_artist, flags=re.IGNORECASE).strip()
-        search_query = f"{clean_art} {raw_title}".strip()
+        clean_search_art = clean_art.replace(',', ' ').strip()
+        search_query = f"{clean_search_art} {raw_title}".strip()
         if search_query in ['Unknown Artist Unknown Track', 'Unknown Artist YouTube Track', 'Unknown Track']:
             search_query = ""
 
+        # ساخت لیست سورس‌ها با اولویت‌بندی هوشمند
         if source_url and ('soundcloud.com' in source_url or video_id.startswith('sc_')):
             sources = [source_url]
             if search_query:
-                sources.append(f"ytsearch1:{search_query}")
                 sources.append(f"scsearch1:{search_query}")
+                sources.append(f"ytsearch1:{search_query}")
         elif video_id.startswith('sc_'):
             sources = []
             if search_query:
-                sources.append(f"ytsearch1:{search_query}")
                 sources.append(f"scsearch1:{search_query}")
+                sources.append(f"ytsearch1:{search_query}")
         else:
             sources = [f"https://www.youtube.com/watch?v={video_id}"]
             if search_query:
-                sources.append(f"ytsearch1:{search_query}")
+                # اولویت با ساندکلاد برای فال‌بک چون در دیتاسنترها بلاک یوتیوب و 403 ندارد
                 sources.append(f"scsearch1:{search_query}")
+                sources.append(f"ytsearch1:{search_query}")
+                # اگر چند خواننده بود، فال‌بک با خواننده اول هم اضافه شود
+                if ',' in clean_art:
+                    first_art = clean_art.split(',')[0].strip()
+                    if first_art:
+                        sources.append(f"scsearch1:{first_art} {raw_title}")
 
-        logger.info(f"[*] Starting Multi-Source Download for [{video_id}] | Quality: {target_quality}kbps")
+        logger.info(f"[*] Starting Multi-Source Download for [{video_id}] | Expected Dur: {expected_dur}s | Quality: {target_quality}kbps")
 
         for source in sources:
             output_template = os.path.join(self.download_dir, f"{video_id}.%(ext)s")
@@ -297,6 +312,23 @@ class YouTubeService:
 
                 info = await asyncio.to_thread(run_dl)
                 if info and os.path.exists(final_path):
+                    # 🛡 اعتبارسنجی مدت‌زمان فایل دانلودشده برای سورس‌های فال‌بک (Fallback Integrity Guard)
+                    is_direct_source = ('watch?v=' in source or 'soundcloud.com/' in source) and not ('search' in source)
+                    if not is_direct_source and expected_dur and expected_dur > 30:
+                        try:
+                            audio_check = MP3(final_path)
+                            actual_dur = int(audio_check.info.length)
+                            if abs(actual_dur - expected_dur) > 18:
+                                logger.warning(
+                                    f"⚠️ Fallback source [{source}] produced duration {actual_dur}s "
+                                    f"which deviates from expected {expected_dur}s. Rejecting false match."
+                                )
+                                if os.path.exists(final_path):
+                                    os.remove(final_path)
+                                continue
+                        except Exception as dur_err:
+                            logger.debug(f"Duration check non-fatal error: {dur_err}")
+
                     logger.info(f"[+] Successfully downloaded via [{source}]: {final_path}")
                     if metadata:
                         self.apply_metadata_to_file(final_path, metadata)

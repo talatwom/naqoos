@@ -461,10 +461,22 @@ async def _async_logic(video_id, title, artist, user_id, user_first_name, sessio
             logger.warning(f"Cache check error: {c_err}")
 
         if cached_track:
-            logger.info(f"⚡️ Vault Hit for '{final_title}' ({video_id})! Skipping YouTube download.")
-            track_meta = cached_track
-            path = None
-        else:
+            # 🛡 بررسی اعتبارسنجی مدت‌زمان ترک در کش مخزن (Duration Integrity Guard)
+            expected_dur = duration or rich_metadata.get('duration')
+            cached_dur = cached_track.get('duration') or 0
+            if expected_dur and cached_dur and abs(expected_dur - cached_dur) > 15:
+                logger.warning(
+                    f"⚠️ Vault Cache Mismatch for '{final_title}' ({video_id}): "
+                    f"Cached duration ({cached_dur}s) deviates significantly from requested ({expected_dur}s). "
+                    f"Bypassing stale/mismatched vault cache to re-download true audio."
+                )
+                cached_track = None
+            else:
+                logger.info(f"⚡️ Vault Hit for '{final_title}' ({video_id})! Skipping YouTube download.")
+                track_meta = cached_track
+                path = None
+        
+        if not cached_track:
             # محاسبه هوشمند بیت‌ریت برای فایل‌های طولانی (بیش از ۲۰ دقیقه) تا حجم فایل زیر ۴۸ مگابایت تلگرام بماند
             effective_quality = quality
             file_duration = duration or rich_metadata.get('duration')
